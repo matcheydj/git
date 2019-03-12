@@ -331,7 +331,9 @@ static int patch_update_file(struct add_p_state *state)
 			strbuf_addstr(&state->buf, ",j");
 		if (hunk_index + 1 < state->hunk_nr)
 			strbuf_addstr(&state->buf, ",J");
-		printf(_("Stage this hunk [y,n,a,d%s,?]? "), state->buf.buf);
+		color_fprintf(stdout, state->state.prompt_color,
+			      _("Stage this hunk [y,n,a,d%s,?]? "),
+			      state->buf.buf);
 		fflush(stdout);
 		if (strbuf_getline(&state->answer, stdin) == EOF)
 			break;
@@ -373,7 +375,8 @@ soft_increment:
 		else if (undecided_next >= 0 && state->answer.buf[0] == 'j')
 			hunk_index = undecided_next;
 		else
-			puts(_(help_patch_text));
+			color_fprintf(stdout, state->state.help_color,
+				      _(help_patch_text));
 	}
 
 	/* Any hunk to be used? */
