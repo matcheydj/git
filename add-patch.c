@@ -336,6 +336,7 @@ static int parse_diff(struct add_p_state *state, const struct pathspec *ps)
 
 	if (want_color_fd(1, -1)) {
 		struct child_process colored_cp = CHILD_PROCESS_INIT;
+		const char *diff_filter = state->state.interactive_diff_filter;
 
 		setup_child_process(&colored_cp, state, NULL);
 		xsnprintf((char *)args.argv[color_arg_index], 8, "--color");
@@ -345,6 +346,24 @@ static int parse_diff(struct add_p_state *state, const struct pathspec *ps)
 		argv_array_clear(&args);
 		if (res)
 			return error(_("could not parse colored diff"));
+
+		if (diff_filter) {
+			struct child_process filter_cp = CHILD_PROCESS_INIT;
+
+			setup_child_process(&filter_cp, state,
+					    diff_filter, NULL);
+			filter_cp.git_cmd = 0;
+			filter_cp.use_shell = 1;
+			strbuf_reset(&state->buf);
+			if (pipe_command(&filter_cp,
+					 colored->buf, colored->len,
+					 &state->buf, colored->len,
+					 NULL, 0) < 0)
+				return error(_("failed to run '%s'"),
+					     diff_filter);
+			strbuf_swap(colored, &state->buf);
+		}
+
 		strbuf_complete_line(colored);
 		colored_p = colored->buf;
 		colored_pend = colored_p + colored->len;
@@ -446,6 +465,9 @@ static int parse_diff(struct add_p_state *state, const struct pathspec *ps)
 						   colored_pend - colored_p);
 			if (colored_eol)
 				colored_p = colored_eol + 1;
+			else if (p != pend)
+				/* colored shorter than non-colored? */
+				goto mismatched_output;
 			else
 				colored_p = colored_pend;
 
@@ -466,6 +488,15 @@ static int parse_diff(struct add_p_state *state, const struct pathspec *ps)
 		 * to the file, so there are no trailing context lines).
 		 */
 		hunk->splittable_into++;
+
+	/* non-colored shorter than colored? */
+	if (colored_p != colored_pend) {
+mismatched_output:
+		error(_("mismatched output from interactive.diffFilter"));
+		advise(_("Your filter must maintain a one-to-one correspondence\n"
+			 "between its input and output lines."));
+		return -1;
+	}
 
 	return 0;
 }
