@@ -4,9 +4,10 @@
 #include "run-command.h"
 #include "argv-array.h"
 #include "pathspec.h"
+#include "color.h"
 
 struct hunk {
-	size_t start, end;
+	size_t start, end, colored_start, colored_end;
 	enum { UNDECIDED_HUNK = 0, SKIP_HUNK, USE_HUNK } use;
 };
 
@@ -15,7 +16,7 @@ struct add_p_state {
 	struct strbuf answer, buf;
 
 	/* parsed diff */
-	struct strbuf plain;
+	struct strbuf plain, colored;
 	struct hunk head;
 	struct hunk *hunk;
 	size_t hunk_nr, hunk_alloc;
@@ -39,25 +40,49 @@ static void setup_child_process(struct child_process *cp,
 
 static int parse_diff(struct add_p_state *state, const struct pathspec *ps)
 {
-	struct strbuf *plain = &state->plain;
+	struct argv_array args = ARGV_ARRAY_INIT;
+	struct strbuf *plain = &state->plain, *colored = NULL;
 	struct child_process cp = CHILD_PROCESS_INIT;
-	char *p, *pend;
-	size_t i;
+	char *p, *pend, *colored_p = NULL, *colored_pend = NULL;
+	size_t i, color_arg_index;
 	struct hunk *hunk = NULL;
 	int res;
 
 	/* Use `--no-color` explicitly, just in case `diff.color = always`. */
-	setup_child_process(&cp, state,
-			 "diff-files", "-p", "--no-color", "--", NULL);
+	argv_array_pushl(&args, "diff-files", "-p", "--no-color", "--", NULL);
+	color_arg_index = args.argc - 2;
 	for (i = 0; i < ps->nr; i++)
-		argv_array_push(&cp.args, ps->items[i].original);
+		argv_array_push(&args, ps->items[i].original);
 
+	setup_child_process(&cp, state, NULL);
+	cp.argv = args.argv;
 	res = capture_command(&cp, plain, 0);
-	if (res)
+	if (res) {
+		argv_array_clear(&args);
 		return error(_("could not parse diff"));
-	if (!plain->len)
+	}
+	if (!plain->len) {
+		argv_array_clear(&args);
 		return 0;
+	}
 	strbuf_complete_line(plain);
+
+	if (want_color_fd(1, -1)) {
+		struct child_process colored_cp = CHILD_PROCESS_INIT;
+
+		setup_child_process(&colored_cp, state, NULL);
+		xsnprintf((char *)args.argv[color_arg_index], 8, "--color");
+		colored_cp.argv = args.argv;
+		colored = &state->colored;
+		res = capture_command(&colored_cp, colored, 0);
+		argv_array_clear(&args);
+		if (res)
+			return error(_("could not parse colored diff"));
+		strbuf_complete_line(colored);
+		colored_p = colored->buf;
+		colored_pend = colored_p + colored->len;
+	}
+	argv_array_clear(&args);
 
 	/* parse hunks */
 	p = plain->buf;
@@ -82,20 +107,37 @@ static int parse_diff(struct add_p_state *state, const struct pathspec *ps)
 			memset(hunk, 0, sizeof(*hunk));
 
 			hunk->start = p - plain->buf;
+			if (colored)
+				hunk->colored_start = colored_p - colored->buf;
 		}
 
 		p = eol == pend ? pend : eol + 1;
 		hunk->end = p - plain->buf;
+
+		if (colored) {
+			char *colored_eol = memchr(colored_p, '\n',
+						   colored_pend - colored_p);
+			if (colored_eol)
+				colored_p = colored_eol + 1;
+			else
+				colored_p = colored_pend;
+
+			hunk->colored_end = colored_p - colored->buf;
+		}
 	}
 
 	return 0;
 }
 
 static void render_hunk(struct add_p_state *state, struct hunk *hunk,
-			struct strbuf *out)
+			int colored, struct strbuf *out)
 {
-	strbuf_add(out, state->plain.buf + hunk->start,
-		   hunk->end - hunk->start);
+	if (colored)
+		strbuf_add(out, state->colored.buf + hunk->colored_start,
+			   hunk->colored_end - hunk->colored_start);
+	else
+		strbuf_add(out, state->plain.buf + hunk->start,
+			   hunk->end - hunk->start);
 }
 
 static void reassemble_patch(struct add_p_state *state, struct strbuf *out)
@@ -103,12 +145,12 @@ static void reassemble_patch(struct add_p_state *state, struct strbuf *out)
 	struct hunk *hunk;
 	size_t i;
 
-	render_hunk(state, &state->head, out);
+	render_hunk(state, &state->head, 0, out);
 
 	for (i = 0; i < state->hunk_nr; i++) {
 		hunk = state->hunk + i;
 		if (hunk->use == USE_HUNK)
-			render_hunk(state, hunk, out);
+			render_hunk(state, hunk, 0, out);
 	}
 }
 
@@ -130,12 +172,13 @@ static int patch_update_file(struct add_p_state *state)
 	struct hunk *hunk;
 	char ch;
 	struct child_process cp = CHILD_PROCESS_INIT;
+	int colored = !!state->colored.len;
 
 	if (!state->hunk_nr)
 		return 0;
 
 	strbuf_reset(&state->buf);
-	render_hunk(state, &state->head, &state->buf);
+	render_hunk(state, &state->head, colored, &state->buf);
 	fputs(state->buf.buf, stdout);
 	for (;;) {
 		if (hunk_index >= state->hunk_nr)
@@ -162,7 +205,7 @@ static int patch_update_file(struct add_p_state *state)
 			break;
 
 		strbuf_reset(&state->buf);
-		render_hunk(state, hunk, &state->buf);
+		render_hunk(state, hunk, colored, &state->buf);
 		fputs(state->buf.buf, stdout);
 
 		strbuf_reset(&state->buf);
@@ -247,6 +290,7 @@ int run_add_p(struct repository *r, const struct pathspec *ps)
 	if (repo_refresh_and_write_index(r, REFRESH_QUIET, 0) < 0 ||
 	    parse_diff(&state, ps) < 0) {
 		strbuf_release(&state.plain);
+		strbuf_release(&state.colored);
 		return -1;
 	}
 
@@ -256,5 +300,6 @@ int run_add_p(struct repository *r, const struct pathspec *ps)
 	strbuf_release(&state.answer);
 	strbuf_release(&state.buf);
 	strbuf_release(&state.plain);
+	strbuf_release(&state.colored);
 	return 0;
 }
