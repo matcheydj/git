@@ -29,9 +29,12 @@ struct add_p_state {
 
 	/* parsed diff */
 	struct strbuf plain, colored;
-	struct hunk head;
-	struct hunk *hunk;
-	size_t hunk_nr, hunk_alloc;
+	struct file_diff {
+		struct hunk head;
+		struct hunk *hunk;
+		size_t hunk_nr, hunk_alloc;
+	} *file_diff;
+	size_t file_diff_nr;
 };
 
 static void setup_child_process(struct child_process *cp,
@@ -119,7 +122,8 @@ static int parse_diff(struct add_p_state *state, const struct pathspec *ps)
 	struct strbuf *plain = &state->plain, *colored = NULL;
 	struct child_process cp = CHILD_PROCESS_INIT;
 	char *p, *pend, *colored_p = NULL, *colored_pend = NULL;
-	size_t i, color_arg_index;
+	size_t file_diff_alloc = 0, i, color_arg_index;
+	struct file_diff *file_diff = NULL;
 	struct hunk *hunk = NULL;
 	int res;
 
@@ -159,7 +163,7 @@ static int parse_diff(struct add_p_state *state, const struct pathspec *ps)
 	}
 	argv_array_clear(&args);
 
-	/* parse hunks */
+	/* parse files and hunks */
 	p = plain->buf;
 	pend = p + plain->len;
 	while (p != pend) {
@@ -168,17 +172,23 @@ static int parse_diff(struct add_p_state *state, const struct pathspec *ps)
 			eol = pend;
 
 		if (starts_with(p, "diff ")) {
-			if (p != plain->buf)
-				BUG("multi-file diff not yet handled");
-			hunk = &state->head;
+			state->file_diff_nr++;
+			ALLOC_GROW(state->file_diff, state->file_diff_nr,
+				   file_diff_alloc);
+			file_diff = state->file_diff + state->file_diff_nr - 1;
+			memset(file_diff, 0, sizeof(*file_diff));
+			hunk = &file_diff->head;
+			hunk->start = p - plain->buf;
+			if (colored_p)
+				hunk->colored_start = colored_p - colored->buf;
 		} else if (p == plain->buf)
 			BUG("diff starts with unexpected line:\n"
 			    "%.*s\n", (int)(eol - p), p);
 		else if (starts_with(p, "@@ ")) {
-			state->hunk_nr++;
-			ALLOC_GROW(state->hunk, state->hunk_nr,
-				   state->hunk_alloc);
-			hunk = state->hunk + state->hunk_nr - 1;
+			file_diff->hunk_nr++;
+			ALLOC_GROW(file_diff->hunk, file_diff->hunk_nr,
+				   file_diff->hunk_alloc);
+			hunk = file_diff->hunk + file_diff->hunk_nr - 1;
 			memset(hunk, 0, sizeof(*hunk));
 
 			hunk->start = p - plain->buf;
@@ -250,16 +260,17 @@ static void render_hunk(struct add_p_state *state, struct hunk *hunk,
 			   hunk->end - hunk->start);
 }
 
-static void reassemble_patch(struct add_p_state *state, struct strbuf *out)
+static void reassemble_patch(struct add_p_state *state,
+			     struct file_diff *file_diff, struct strbuf *out)
 {
 	struct hunk *hunk;
 	size_t i;
 	ssize_t delta = 0;
 
-	render_hunk(state, &state->head, 0, 0, out);
+	render_hunk(state, &file_diff->head, 0, 0, out);
 
-	for (i = 0; i < state->hunk_nr; i++) {
-		hunk = state->hunk + i;
+	for (i = 0; i < file_diff->hunk_nr; i++) {
+		hunk = file_diff->hunk + i;
 		if (hunk->use != USE_HUNK)
 			delta += hunk->header.old_count
 				- hunk->header.new_count;
@@ -279,7 +290,8 @@ N_("y - stage this hunk\n"
    "K - leave this hunk undecided, see previous hunk\n"
    "? - print help\n");
 
-static int patch_update_file(struct add_p_state *state)
+static int patch_update_file(struct add_p_state *state,
+			     struct file_diff *file_diff)
 {
 	size_t hunk_index = 0;
 	ssize_t i, undecided_previous, undecided_next;
@@ -288,27 +300,27 @@ static int patch_update_file(struct add_p_state *state)
 	struct child_process cp = CHILD_PROCESS_INIT;
 	int colored = !!state->colored.len;
 
-	if (!state->hunk_nr)
+	if (!file_diff->hunk_nr)
 		return 0;
 
 	strbuf_reset(&state->buf);
-	render_hunk(state, &state->head, 0, colored, &state->buf);
+	render_hunk(state, &file_diff->head, 0, colored, &state->buf);
 	fputs(state->buf.buf, stdout);
 	for (;;) {
-		if (hunk_index >= state->hunk_nr)
+		if (hunk_index >= file_diff->hunk_nr)
 			hunk_index = 0;
-		hunk = state->hunk + hunk_index;
+		hunk = file_diff->hunk + hunk_index;
 
 		undecided_previous = -1;
 		for (i = hunk_index - 1; i >= 0; i--)
-			if (state->hunk[i].use == UNDECIDED_HUNK) {
+			if (file_diff->hunk[i].use == UNDECIDED_HUNK) {
 				undecided_previous = i;
 				break;
 			}
 
 		undecided_next = -1;
-		for (i = hunk_index + 1; i < state->hunk_nr; i++)
-			if (state->hunk[i].use == UNDECIDED_HUNK) {
+		for (i = hunk_index + 1; i < file_diff->hunk_nr; i++)
+			if (file_diff->hunk[i].use == UNDECIDED_HUNK) {
 				undecided_next = i;
 				break;
 			}
@@ -329,7 +341,7 @@ static int patch_update_file(struct add_p_state *state)
 			strbuf_addstr(&state->buf, ",K");
 		if (undecided_next >= 0)
 			strbuf_addstr(&state->buf, ",j");
-		if (hunk_index + 1 < state->hunk_nr)
+		if (hunk_index + 1 < file_diff->hunk_nr)
 			strbuf_addstr(&state->buf, ",J");
 		color_fprintf(stdout, state->state.prompt_color,
 			      _("Stage this hunk [y,n,a,d%s,?]? "),
@@ -345,22 +357,22 @@ static int patch_update_file(struct add_p_state *state)
 		if (ch == 'y') {
 			hunk->use = USE_HUNK;
 soft_increment:
-			while (++hunk_index < state->hunk_nr &&
-			       state->hunk[hunk_index].use
+			while (++hunk_index < file_diff->hunk_nr &&
+			       file_diff->hunk[hunk_index].use
 			       != UNDECIDED_HUNK)
 				; /* continue looking */
 		} else if (ch == 'n') {
 			hunk->use = SKIP_HUNK;
 			goto soft_increment;
 		} else if (ch == 'a') {
-			for (; hunk_index < state->hunk_nr; hunk_index++) {
-				hunk = state->hunk + hunk_index;
+			for (; hunk_index < file_diff->hunk_nr; hunk_index++) {
+				hunk = file_diff->hunk + hunk_index;
 				if (hunk->use == UNDECIDED_HUNK)
 					hunk->use = USE_HUNK;
 			}
 		} else if (ch == 'd') {
-			for (; hunk_index < state->hunk_nr; hunk_index++) {
-				hunk = state->hunk + hunk_index;
+			for (; hunk_index < file_diff->hunk_nr; hunk_index++) {
+				hunk = file_diff->hunk + hunk_index;
 				if (hunk->use == UNDECIDED_HUNK)
 					hunk->use = SKIP_HUNK;
 			}
@@ -372,7 +384,7 @@ soft_increment:
 						 state->state.error_color,
 						 _("No previous hunk"));
 		} else if (state->answer.buf[0] == 'J') {
-			if (hunk_index + 1 < state->hunk_nr)
+			if (hunk_index + 1 < file_diff->hunk_nr)
 				hunk_index++;
 			else
 				color_fprintf_ln(stderr,
@@ -398,14 +410,14 @@ soft_increment:
 	}
 
 	/* Any hunk to be used? */
-	for (i = 0; i < state->hunk_nr; i++)
-		if (state->hunk[i].use == USE_HUNK)
+	for (i = 0; i < file_diff->hunk_nr; i++)
+		if (file_diff->hunk[i].use == USE_HUNK)
 			break;
 
-	if (i < state->hunk_nr) {
+	if (i < file_diff->hunk_nr) {
 		/* At least one hunk selected: apply */
 		strbuf_reset(&state->buf);
-		reassemble_patch(state, &state->buf);
+		reassemble_patch(state, file_diff, &state->buf);
 
 		setup_child_process(&cp, state, "apply", "--cached", NULL);
 		if (pipe_command(&cp, state->buf.buf, state->buf.len,
@@ -423,6 +435,7 @@ int run_add_p(struct repository *r, const struct pathspec *ps)
 	struct add_p_state state = {
 		{ r }, STRBUF_INIT, STRBUF_INIT, STRBUF_INIT, STRBUF_INIT
 	};
+	size_t i;
 
 	if (init_add_i_state(r, &state.state))
 		return error("Could not read `add -i` config");
@@ -434,8 +447,9 @@ int run_add_p(struct repository *r, const struct pathspec *ps)
 		return -1;
 	}
 
-	if (state.hunk_nr)
-		patch_update_file(&state);
+	for (i = 0; i < state.file_diff_nr; i++)
+		if (patch_update_file(&state, state.file_diff + i))
+			break;
 
 	strbuf_release(&state.answer);
 	strbuf_release(&state.buf);
