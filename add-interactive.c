@@ -52,6 +52,13 @@ int init_add_i_state(struct repository *r, struct add_i_state *state)
 
 	strlcpy(state->fraginfo_color,
 		diff_get_color(state->use_color, DIFF_FRAGINFO), COLOR_MAXLEN);
+	strlcpy(state->context_color,
+		diff_get_color(state->use_color, DIFF_CONTEXT), COLOR_MAXLEN);
+	strlcpy(state->file_old_color,
+		diff_get_color(state->use_color, DIFF_FILE_OLD), COLOR_MAXLEN);
+	strlcpy(state->file_new_color,
+		diff_get_color(state->use_color, DIFF_FILE_NEW), COLOR_MAXLEN);
+
 
 	return 0;
 }
