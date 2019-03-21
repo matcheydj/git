@@ -893,6 +893,54 @@ static int edit_hunk_loop(struct add_p_state *state,
 	}
 }
 
+#define SUMMARY_HEADER_WIDTH 20
+#define SUMMARY_LINE_WIDTH 80
+static void summarize_hunk(struct add_p_state *state, struct hunk *hunk,
+			   struct strbuf *out)
+{
+	struct hunk_header *header = &hunk->header;
+	struct strbuf *plain = &state->plain;
+	size_t len = out->len, i;
+
+	strbuf_addf(out, " -%lu,%lu +%lu,%lu ",
+		    header->old_offset, header->old_count,
+		    header->new_offset, header->new_count);
+	if (out->len - len < SUMMARY_HEADER_WIDTH)
+		strbuf_addchars(out, ' ',
+				SUMMARY_HEADER_WIDTH + len - out->len);
+	for (i = hunk->start; i < hunk->end; i = find_next_line(plain, i))
+		if (plain->buf[i] != ' ')
+			break;
+	if (i < hunk->end)
+		strbuf_add(out, plain->buf + i, find_next_line(plain, i) - i);
+	if (out->len - len > SUMMARY_LINE_WIDTH)
+		strbuf_setlen(out, len + SUMMARY_LINE_WIDTH);
+	strbuf_complete_line(out);
+}
+
+#define DISPLAY_HUNKS_LINES 20
+static size_t display_hunks(struct add_p_state *state,
+			    struct file_diff *file_diff, size_t start_index)
+{
+	size_t end_index = start_index + DISPLAY_HUNKS_LINES;
+
+	if (end_index > file_diff->hunk_nr)
+		end_index = file_diff->hunk_nr;
+
+	while (start_index < end_index) {
+		struct hunk *hunk = file_diff->hunk + start_index++;
+
+		strbuf_reset(&state->buf);
+		strbuf_addf(&state->buf, "%c%2d: ", hunk->use == USE_HUNK ? '+'
+			    : hunk->use == SKIP_HUNK ? '-' : ' ',
+			    (int)start_index);
+		summarize_hunk(state, hunk, &state->buf);
+		fputs(state->buf.buf, stdout);
+	}
+
+	return end_index;
+}
+
 static const char help_patch_text[] =
 N_("y - stage this hunk\n"
    "n - do not stage this hunk\n"
@@ -902,6 +950,7 @@ N_("y - stage this hunk\n"
    "J - leave this hunk undecided, see next hunk\n"
    "k - leave this hunk undecided, see previous undecided hunk\n"
    "K - leave this hunk undecided, see previous hunk\n"
+   "g - select a hunk to go to\n"
    "s - split the current hunk into smaller hunks\n"
    "e - manually edit the current hunk\n"
    "? - print help\n");
@@ -960,6 +1009,8 @@ static int patch_update_file(struct add_p_state *state,
 			strbuf_addstr(&state->buf, ",j");
 		if (hunk_index + 1 < file_diff->hunk_nr)
 			strbuf_addstr(&state->buf, ",J");
+		if (file_diff->hunk_nr > 1)
+			strbuf_addstr(&state->buf, ",g");
 		if (hunk->splittable_into > 1)
 			strbuf_addstr(&state->buf, ",s");
 		if (hunk_index + 1 > file_diff->mode_change &&
@@ -1033,6 +1084,49 @@ soft_increment:
 				color_fprintf_ln(stderr,
 						 state->state.error_color,
 						 _("No next hunk"));
+		} else if (state->answer.buf[0] == 'g') {
+			char *pend;
+			unsigned long response;
+
+			if (file_diff->hunk_nr < 2) {
+				color_fprintf_ln(stderr,
+						 state->state.error_color,
+						 _("No other hunks to goto"));
+				continue;
+			}
+			strbuf_remove(&state->answer, 0, 1);
+			strbuf_trim(&state->answer);
+			i = hunk_index > 10 ? hunk_index - 10 : 0;
+			while (state->answer.len == 0) {
+				i = display_hunks(state, file_diff, i);
+				printf("%s", i < file_diff->hunk_nr ?
+				       _("go to which hunk (<ret> to see "
+					 "more)? ") : _("go to which hunk? "));
+				fflush(stdout);
+				if (strbuf_getline(&state->answer,
+						   stdin) == EOF)
+					break;
+				strbuf_trim_trailing_newline(&state->answer);
+			}
+
+			strbuf_trim(&state->answer);
+			response = strtoul(state->answer.buf, &pend, 10);
+			if (*pend || pend == state->answer.buf)
+				color_fprintf_ln(stderr,
+						 state->state.error_color,
+						 _("Invalid number: '%s'"),
+						 state->answer.buf);
+			else if (0 < response && response <= file_diff->hunk_nr)
+				hunk_index = response - 1;
+			else
+				color_fprintf_ln(stderr,
+						 state->state.error_color,
+						 Q_("Sorry, only %d hunk "
+						    "available.",
+						    "Sorry, only %d hunks "
+						    "available.",
+						    file_diff->hunk_nr),
+						 (int)file_diff->hunk_nr);
 		} else if (state->answer.buf[0] == 's') {
 			size_t splittable_into = hunk->splittable_into;
 			if (splittable_into < 2)
