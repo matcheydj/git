@@ -951,6 +951,7 @@ N_("y - stage this hunk\n"
    "k - leave this hunk undecided, see previous undecided hunk\n"
    "K - leave this hunk undecided, see previous hunk\n"
    "g - select a hunk to go to\n"
+   "/ - search for a hunk matching the given regex\n"
    "s - split the current hunk into smaller hunks\n"
    "e - manually edit the current hunk\n"
    "? - print help\n");
@@ -1010,7 +1011,7 @@ static int patch_update_file(struct add_p_state *state,
 		if (hunk_index + 1 < file_diff->hunk_nr)
 			strbuf_addstr(&state->buf, ",J");
 		if (file_diff->hunk_nr > 1)
-			strbuf_addstr(&state->buf, ",g");
+			strbuf_addstr(&state->buf, ",g,/");
 		if (hunk->splittable_into > 1)
 			strbuf_addstr(&state->buf, ",s");
 		if (hunk_index + 1 > file_diff->mode_change &&
@@ -1127,6 +1128,61 @@ soft_increment:
 						    "available.",
 						    file_diff->hunk_nr),
 						 (int)file_diff->hunk_nr);
+		} else if (state->answer.buf[0] == '/') {
+			regex_t regex;
+			int ret;
+
+			if (file_diff->hunk_nr < 2) {
+				color_fprintf_ln(stderr,
+						 state->state.error_color,
+						 _("No other hunks to search"));
+				continue;
+			}
+			strbuf_remove(&state->answer, 0, 1);
+			strbuf_trim_trailing_newline(&state->answer);
+			if (state->answer.len == 0) {
+				printf("%s", _("search for regex? "));
+				fflush(stdout);
+				if (strbuf_getline(&state->answer,
+						   stdin) == EOF)
+					break;
+				strbuf_trim_trailing_newline(&state->answer);
+				if (state->answer.len == 0)
+					continue;
+			}
+			ret = regcomp(&regex, state->answer.buf,
+				      REG_EXTENDED | REG_NOSUB | REG_NEWLINE);
+			if (ret) {
+				char errbuf[1024];
+
+				regerror(ret, &regex, errbuf, sizeof(errbuf));
+				color_fprintf_ln(stderr,
+						 state->state.error_color,
+						 _("Malformed search regexp "
+						   "%s: %s"),
+						 state->answer.buf, errbuf);
+				continue;
+			}
+			i = hunk_index;
+			for (;;) {
+				/* render the hunk into a scratch buffer */
+				render_hunk(state, file_diff->hunk + i, 0, 0,
+					    &state->buf);
+				if (regexec(&regex, state->buf.buf, 0, NULL, 0)
+				    != REG_NOMATCH)
+					break;
+				i++;
+				if (i == file_diff->hunk_nr)
+					i = 0;
+				if (i != hunk_index)
+					continue;
+				color_fprintf_ln(stderr,
+						 state->state.error_color,
+						 _("No hunk matches the given "
+						   "pattern"));
+				break;
+			}
+			hunk_index = i;
 		} else if (state->answer.buf[0] == 's') {
 			size_t splittable_into = hunk->splittable_into;
 			if (splittable_into < 2)
