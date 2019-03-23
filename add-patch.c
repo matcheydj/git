@@ -11,10 +11,33 @@ enum prompt_mode_type {
 	PROMPT_MODE_CHANGE = 0, PROMPT_DELETION, PROMPT_HUNK
 };
 
-static const char *prompt_mode[] = {
-	N_("Stage mode change [y,n,a,q,d%s,?]? "),
-	N_("Stage deletion [y,n,a,q,d%s,?]? "),
-	N_("Stage this hunk [y,n,a,q,d%s,?]? ")
+struct patch_mode {
+	const char *diff[4], *apply[4], *apply_check[4];
+	unsigned is_reverse:1, apply_for_checkout:1;
+	const char *prompt_mode[PROMPT_HUNK + 1];
+	const char *edit_hunk_hint, *help_patch_text;
+};
+
+static struct patch_mode patch_mode_stage = {
+	.diff = { "diff-files", NULL },
+	.apply = { "--cached", NULL },
+	.apply_check = { "--cached", NULL },
+	.is_reverse = 0,
+	.prompt_mode = {
+		N_("Stage mode change [y,n,q,a,d%s,?]? "),
+		N_("Stage deletion [y,n,q,a,d%s,?]? "),
+		N_("Stage this hunk [y,n,q,a,d%s,?]? ")
+	},
+	.edit_hunk_hint = N_("If the patch applies cleanly, the edited hunk "
+			     "will immediately be marked for staging."),
+	.help_patch_text =
+		N_("y - stage this hunk\n"
+		   "n - do not stage this hunk\n"
+		   "q - quit; do not stage this hunk or any of the remaining "
+			"ones\n"
+		   "a - stage this hunk and all later hunks in the file\n"
+		   "d - do not stage this hunk or any of the later hunks in "
+			"the file\n")
 };
 
 struct hunk_header {
@@ -47,6 +70,10 @@ struct add_p_state {
 		unsigned deleted:1, mode_change:1,binary:1;
 	} *file_diff;
 	size_t file_diff_nr;
+
+	/* patch mode */
+	struct patch_mode *mode;
+	const char *revision;
 };
 
 static void setup_child_process(struct child_process *cp,
@@ -147,9 +174,18 @@ static int parse_diff(struct add_p_state *state, const struct pathspec *ps)
 	struct hunk *hunk = NULL;
 	int res;
 
+	argv_array_pushv(&args, state->mode->diff);
+	if (state->revision) {
+		struct object_id oid;
+		argv_array_push(&args,
+				/* could be on an unborn branch */
+				!strcmp("HEAD", state->revision) &&
+				get_oid("HEAD", &oid) ?
+				empty_tree_oid_hex() : state->revision);
+	}
+	color_arg_index = args.argc;
 	/* Use `--no-color` explicitly, just in case `diff.color = always`. */
-	argv_array_pushl(&args, "diff-files", "-p", "--no-color", "--", NULL);
-	color_arg_index = args.argc - 2;
+	argv_array_pushl(&args, "--no-color", "-p", "--", NULL);
 	for (i = 0; i < ps->nr; i++)
 		argv_array_push(&args, ps->items[i].original);
 
@@ -726,11 +762,10 @@ static int edit_hunk_manually(struct add_p_state *state, struct hunk *hunk)
 				"(context).\n"
 				"To remove '%c' lines, delete them.\n"
 				"Lines starting with %c will be removed.\n"),
-			      '-', '+', comment_line_char);
-	strbuf_commented_addf(&buf,
-			      _("If the patch applies cleanly, the edited hunk "
-				"will immediately be\n"
-				"marked for staging.\n"));
+			      state->mode->is_reverse ? '+' : '-',
+			      state->mode->is_reverse ? '-' : '+',
+			      comment_line_char);
+	strbuf_commented_addf(&buf, "%s", _(state->mode->edit_hunk_hint));
 	/*
 	 * TRANSLATORS: 'it' refers to the patch mentioned in the previous
 	 * messages.
@@ -826,7 +861,8 @@ static int run_apply_check(struct add_p_state *state,
 	reassemble_patch(state, file_diff, 1, &state->buf);
 
 	setup_child_process(&cp, state,
-			    "apply", "--cached", "--check", NULL);
+			    "apply", "--check", NULL);
+	argv_array_pushv(&cp.args, state->mode->apply_check);
 	if (pipe_command(&cp, state->buf.buf, state->buf.len, NULL, 0, NULL, 0))
 		return error(_("'git apply --cached' failed"));
 
@@ -943,13 +979,6 @@ static size_t display_hunks(struct add_p_state *state,
 	return end_index;
 }
 
-static const char help_patch_text[] =
-N_("y - stage this hunk\n"
-   "n - do not stage this hunk\n"
-   "q - quit; do not stage this hunk or any of the remaining ones\n"
-   "a - stage this and all the remaining hunks\n"
-   "d - do not stage this hunk nor any of the remaining hunks\n");
-
 static const char help_patch_remainder[] =
 N_("j - leave this hunk undecided, see next undecided hunk\n"
    "J - leave this hunk undecided, see next hunk\n"
@@ -1031,7 +1060,8 @@ static int patch_update_file(struct add_p_state *state,
 			prompt_mode_type = PROMPT_HUNK;
 
 		color_fprintf(stdout, state->state.prompt_color,
-			      _(prompt_mode[prompt_mode_type]), state->buf.buf);
+			      _(state->mode->prompt_mode[prompt_mode_type]),
+			      state->buf.buf);
 		fflush(stdout);
 		if (strbuf_getline(&state->answer, stdin) == EOF)
 			break;
@@ -1219,7 +1249,7 @@ soft_increment:
 			const char *p = _(help_patch_remainder), *eol = p;
 
 			color_fprintf(stdout, state->state.help_color, "%s",
-				      _(help_patch_text));
+				      _(state->mode->help_patch_text));
 
 			/*
 			 * Show only those lines of the remainder that are
@@ -1253,10 +1283,11 @@ soft_increment:
 		strbuf_reset(&state->buf);
 		reassemble_patch(state, file_diff, 0, &state->buf);
 
-		setup_child_process(&cp, state, "apply", "--cached", NULL);
+		setup_child_process(&cp, state, "apply", NULL);
+		argv_array_pushv(&cp.args, state->mode->apply);
 		if (pipe_command(&cp, state->buf.buf, state->buf.len,
 				 NULL, 0, NULL, 0))
-			error(_("'git apply --cached' failed"));
+			error(_("'git apply' failed"));
 		repo_refresh_and_write_index(state->state.r, REFRESH_QUIET, 0);
 	}
 
@@ -1264,7 +1295,8 @@ soft_increment:
 	return quit;
 }
 
-int run_add_p(struct repository *r, const struct pathspec *ps)
+int run_add_p(struct repository *r, enum add_p_mode mode,
+	      const char *revision, const struct pathspec *ps)
 {
 	struct add_p_state state = {
 		{ r }, STRBUF_INIT, STRBUF_INIT, STRBUF_INIT, STRBUF_INIT
@@ -1273,6 +1305,9 @@ int run_add_p(struct repository *r, const struct pathspec *ps)
 
 	if (init_add_i_state(r, &state.state))
 		return error("Could not read `add -i` config");
+
+	state.mode = &patch_mode_stage;
+	state.revision = revision;
 
 	if (repo_refresh_and_write_index(r, REFRESH_QUIET, 0) < 0 ||
 	    parse_diff(&state, ps) < 0) {
