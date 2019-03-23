@@ -7,6 +7,16 @@
 #include "color.h"
 #include "diff.h"
 
+enum prompt_mode_type {
+	PROMPT_MODE_CHANGE = 0, PROMPT_DELETION, PROMPT_HUNK
+};
+
+static const char *prompt_mode[] = {
+	N_("Stage mode change [y,n,a,d%s,?]? "),
+	N_("Stage deletion [y,n,a,d%s,?]? "),
+	N_("Stage this hunk [y,n,a,d%s,?]? ")
+};
+
 struct hunk_header {
 	unsigned long old_offset, old_count, new_offset, new_count;
 	/*
@@ -378,6 +388,7 @@ static int patch_update_file(struct add_p_state *state,
 	char ch;
 	struct child_process cp = CHILD_PROCESS_INIT;
 	int colored = !!state->colored.len;
+	enum prompt_mode_type prompt_mode_type;
 
 	if (!file_diff->hunk_nr)
 		return 0;
@@ -422,9 +433,16 @@ static int patch_update_file(struct add_p_state *state,
 			strbuf_addstr(&state->buf, ",j");
 		if (hunk_index + 1 < file_diff->hunk_nr)
 			strbuf_addstr(&state->buf, ",J");
+
+		if (file_diff->deleted)
+			prompt_mode_type = PROMPT_DELETION;
+		else if (file_diff->mode_change && !hunk_index)
+			prompt_mode_type = PROMPT_MODE_CHANGE;
+		else
+			prompt_mode_type = PROMPT_HUNK;
+
 		color_fprintf(stdout, state->state.prompt_color,
-			      _("Stage this hunk [y,n,a,d%s,?]? "),
-			      state->buf.buf);
+			      _(prompt_mode[prompt_mode_type]), state->buf.buf);
 		fflush(stdout);
 		if (strbuf_getline(&state->answer, stdin) == EOF)
 			break;
