@@ -44,7 +44,7 @@ struct add_p_state {
 		struct hunk head;
 		struct hunk *hunk;
 		size_t hunk_nr, hunk_alloc;
-		unsigned deleted:1, mode_change:1;
+		unsigned deleted:1, mode_change:1,binary:1;
 	} *file_diff;
 	size_t file_diff_nr;
 };
@@ -255,7 +255,9 @@ static int parse_diff(struct add_p_state *state, const struct pathspec *ps)
 				file_diff->mode_change = 1;
 			} else if (file_diff->hunk_nr != 1)
 				BUG("mode change after first hunk?");
-		}
+		} else if (hunk == &file_diff->head &&
+			   starts_with(p, "Binary files "))
+			file_diff->binary = 1;
 
 		if (file_diff->deleted && file_diff->mode_change)
 			BUG("diff contains delete *and* a mode change?!?\n%.*s",
@@ -1267,7 +1269,7 @@ int run_add_p(struct repository *r, const struct pathspec *ps)
 	struct add_p_state state = {
 		{ r }, STRBUF_INIT, STRBUF_INIT, STRBUF_INIT, STRBUF_INIT
 	};
-	size_t i;
+	size_t i, binary_count = 0;
 
 	if (init_add_i_state(r, &state.state))
 		return error("Could not read `add -i` config");
@@ -1280,8 +1282,15 @@ int run_add_p(struct repository *r, const struct pathspec *ps)
 	}
 
 	for (i = 0; i < state.file_diff_nr; i++)
-		if (patch_update_file(&state, state.file_diff + i))
+		if (state.file_diff[i].binary && !state.file_diff[i].hunk_nr)
+			binary_count++;
+		else if (patch_update_file(&state, state.file_diff + i))
 			break;
+
+	if (state.file_diff_nr == 0)
+		fprintf(stderr, _("No changes.\n"));
+	else if (binary_count == state.file_diff_nr)
+		fprintf(stderr, _("Only binary files changed.\n"));
 
 	strbuf_release(&state.answer);
 	strbuf_release(&state.buf);
