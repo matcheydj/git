@@ -6,6 +6,7 @@
 #include "pathspec.h"
 #include "color.h"
 #include "diff.h"
+#include "compat/terminal.h"
 
 enum prompt_mode_type {
 	PROMPT_MODE_CHANGE = 0, PROMPT_DELETION, PROMPT_HUNK
@@ -1035,15 +1036,28 @@ static int run_apply_check(struct add_p_state *state,
 	return 0;
 }
 
+static int read_single_character(struct add_p_state *state, struct strbuf *buf)
+{
+	if (state->state.use_single_key) {
+		int res = read_key_without_echo(buf);
+		printf("%s\n", res == EOF ? "" : buf->buf);
+		return res;
+	}
+
+	if (strbuf_getline(buf, stdin) == EOF)
+		return EOF;
+	strbuf_trim_trailing_newline(buf);
+	return 0;
+}
+
 static int prompt_yesno(struct add_p_state *state, const char *prompt)
 {
 	for (;;) {
 		color_fprintf(stdout, state->state.prompt_color,
 			      "%s", _(prompt));
 		fflush(stdout);
-		if (strbuf_getline(&state->answer, stdin) == EOF)
+		if (read_single_character(state, &state->answer) == EOF)
 			return -1;
-		strbuf_trim_trailing_newline(&state->answer);
 		switch (tolower(state->answer.buf[0])) {
 		case 'n': return 0;
 		case 'y': return 1;
@@ -1283,9 +1297,8 @@ static int patch_update_file(struct add_p_state *state,
 			      _(state->mode->prompt_mode[prompt_mode_type]),
 			      state->buf.buf);
 		fflush(stdout);
-		if (strbuf_getline(&state->answer, stdin) == EOF)
+		if (read_single_character(state, &state->answer) == EOF)
 			break;
-		strbuf_trim_trailing_newline(&state->answer);
 
 		if (!state->answer.len)
 			continue;

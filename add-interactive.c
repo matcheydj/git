@@ -69,6 +69,10 @@ int init_add_i_state(struct repository *r, struct add_i_state *state)
 				  &state->interactive_diff_algorithm))
 		state->interactive_diff_algorithm = NULL;
 
+	if (git_config_get_bool("interactive.singlekey",
+				&state->use_single_key))
+		state->use_single_key = 0;
+
 	return 0;
 }
 
