@@ -59,6 +59,19 @@ int init_add_i_state(struct repository *r, struct add_i_state *state)
 	strlcpy(state->file_new_color,
 		diff_get_color(state->use_color, DIFF_FILE_NEW), COLOR_MAXLEN);
 
+	free(state->interactive_diff_filter);
+	if (git_config_get_string("interactive.difffilter",
+				  &state->interactive_diff_filter))
+		state->interactive_diff_filter = NULL;
+
+	free(state->interactive_diff_algorithm);
+	if (git_config_get_string("diff.algorithm",
+				  &state->interactive_diff_algorithm))
+		state->interactive_diff_algorithm = NULL;
+
+	if (git_config_get_bool("interactive.singlekey",
+				&state->use_single_key))
+		state->use_single_key = 0;
 
 	return 0;
 }
